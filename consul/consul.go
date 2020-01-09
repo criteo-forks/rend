@@ -18,15 +18,20 @@ func GetNodes(service string, consulAddr string, dc string) ([]string, error) {
 	}
 
 	health := client.Health()
-	entries, _, err := health.Service(service, "", true, &api.QueryOptions{Datacenter: dc})
+
+	return getServiceFromConsul(health.Service, service, dc)
+}
+
+func getServiceFromConsul(getService func(string, string, bool, *api.QueryOptions) ([]*api.ServiceEntry, *api.QueryMeta, error), service string, dc string) ([]string, error) {
+	entries, _, err := getService(service, "", true, &api.QueryOptions{Datacenter: dc})
 	if err != nil {
 		log.Println("Failed to get service from Consul:", err)
 		return nil, err
 	}
-	return extractNodesAdresses(entries), nil
+	return extractNodesAddresses(entries), nil
 }
 
-func extractNodesAdresses(entries []*api.ServiceEntry) (nodesAddr []string) {
+func extractNodesAddresses(entries []*api.ServiceEntry) (nodesAddr []string) {
 	for i := range entries {
 		nodesAddr = append(nodesAddr, fmt.Sprintf("%s:%d", entries[i].Service.Address, entries[i].Service.Port))
 	}
