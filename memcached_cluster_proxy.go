@@ -2,14 +2,16 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"strings"
 	"sync"
 
+	"github.com/netflix/rend/consul"
 	"github.com/netflix/rend/handlers"
 	"github.com/netflix/rend/handlers/memcached"
 	"github.com/netflix/rend/metrics"
@@ -19,11 +21,33 @@ import (
 	"github.com/netflix/rend/server"
 )
 
+// Flags
+var (
+	srcClusterName string
+	dstClusterName string
+	srcHostnames   string
+	dstHostnames   string
+	srcClusterDC   string
+	dstClusterDC   string
+	consulAddr     string
+	listenPort     int
+	adminPort      int
+)
+
 func init() {
-	// Set GOGC default explicitly
-	if _, set := os.LookupEnv("GOGC"); !set {
-		debug.SetGCPercent(100)
-	}
+	flag.IntVar(&listenPort, "p", 11211, "External port to listen on")
+	flag.IntVar(&adminPort, "admin-port", 8080, "Admin port for metrics and debug")
+	flag.StringVar(&consulAddr, "consul-addr", "localhost:8500", "Consul addr for service resolution (set --hostnames to no use)")
+
+	flag.StringVar(&srcHostnames, "source-hostnames", "", "List of instances of for the source cluster (override Consul service)")
+	flag.StringVar(&srcClusterName, "source-cluster-name", "memcached-cluster", "The consul service name of the source cluster")
+	flag.StringVar(&srcClusterDC, "source-datacenter", "", "The datacenter used for destination cluster (empty for local)")
+
+	flag.StringVar(&dstHostnames, "destination-hostnames", "", "List of instances of for the destination cluster (override Consul service)")
+	flag.StringVar(&dstClusterName, "destination-cluster-name", "memcached-cluster", "The consul service name of the destination cluster")
+	flag.StringVar(&dstClusterDC, "destination-datacenter", "", "The datacenter used for destination cluster (empty for local)")
+
+	flag.Parse()
 
 	// Setting up signal handlers
 	sigs := make(chan os.Signal)
@@ -31,44 +55,32 @@ func init() {
 
 	go func() {
 		<-sigs
-		panic("Keyboard Interrupt")
+		log.Println("Keyboard Interrupt")
+		os.Exit(0)
 	}()
 
 	// http debug and metrics endpoint
-	go http.ListenAndServe("localhost:11299", nil)
+	log.Printf("starting admin endpoint on port %d", adminPort)
+	go http.ListenAndServe(fmt.Sprintf("localhost:%d", adminPort), nil)
 
 	// metrics output prefix
 	metrics.SetPrefix("rend_")
 }
 
-// Flags
-var (
-	clusterName string
-	hostnames   string
+func newHandlerFromConfig(hostnames string, clusterName string, dc string) handlers.HandlerConst {
+	var memcachedInstances []string
 
-	//	l1batched bool
-	//	batchOpts batched.Opts
+	if hostnames != "" {
+		memcachedInstances = strings.Split(hostnames, ",")
+	} else {
+		memcachedInstances = consul.GetNodes(clusterName, consulAddr, dc)
+	}
 
-	//	l2enabled bool
-	//	l2sock    string
+	if len(memcachedInstances) <= 0 || len(memcachedInstances[0]) <= 0 {
+		log.Fatalf("Error: Cannot create a cluster (cluster: %s) of 0 nodes", clusterName)
+	}
 
-	//	locked      bool
-	//	concurrency int
-	//	multiReader bool
-
-	listenPort int
-
-//	batchPort       int
-//	useDomainSocket bool
-//	sockPath        string
-)
-
-func init() {
-	flag.IntVar(&listenPort, "p", 8080, "External port to listen on")
-	flag.StringVar(&clusterName, "cluster-name", "mems99", "The consul service name of the cluster")
-	flag.StringVar(&hostnames, "hostnames", "", "Force the cluster to be represented by those machines")
-
-	flag.Parse()
+	return memcached.Cluster(memcachedInstances, clusterName)
 }
 
 // And away we go
@@ -76,19 +88,11 @@ func main() {
 	l := server.TCPListener(listenPort)
 	protocols := []protocol.Components{binprot.Components}
 
-	var o orcas.OrcaConst
-	var h2 handlers.HandlerConst
-	var h1 handlers.HandlerConst
+	sourceCluster := newHandlerFromConfig(srcHostnames, srcClusterName, srcClusterDC)
+	backfillCluster := newHandlerFromConfig(dstHostnames, dstClusterName, dstClusterDC)
 
-	memcachedInstances := strings.Split(hostnames, ",")
-	if len(memcachedInstances) <= 0 || len(memcachedInstances[0]) <= 0 {
-		panic("Cannot create a cluster of 0 nodes")
-	}
-	h1 = memcached.Cluster(memcachedInstances, clusterName)
-	h2 = memcached.Cluster(memcachedInstances, clusterName)
-	o = orcas.Backfill
-
-	go server.ListenAndServe(l, protocols, server.Default, o, h1, h2)
+	log.Printf("Starting Rend (backfill mode) on port %d", listenPort)
+	go server.ListenAndServe(l, protocols, server.Default, orcas.Backfill, sourceCluster, backfillCluster)
 
 	// Block forever
 	wg := sync.WaitGroup{}

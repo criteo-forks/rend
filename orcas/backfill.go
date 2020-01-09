@@ -1,6 +1,8 @@
 package orcas
 
 import (
+	"log"
+
 	"github.com/netflix/rend/common"
 	"github.com/netflix/rend/handlers"
 	"github.com/netflix/rend/protocol"
@@ -47,17 +49,17 @@ func (l *BackfillOrca) Get(req common.GetRequest) error {
 					l.localCluster.Set(common.SetRequest{Key: res.Key, Data: res.Data, Exptime: 1500, Flags: 0, Opaque: opaque, Quiet: true})
 				}
 
-			case _, ok := <-errChan:
+			case err, ok := <-errChan:
 				if !ok {
 					errChan = nil
 				} else {
-					//TODO: Log
+					log.Println("Error during get from source cluster:", err)
 				}
 			}
 			if responseChan == nil && errChan == nil {
 				break
 			}
-			opaque += 1
+			opaque++
 		}
 	}()
 

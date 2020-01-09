@@ -63,6 +63,7 @@ func (h Handler) Close() error {
 func (h Handler) Set(cmd common.SetRequest) error {
 	return h.Continuum.Hash(cmd.Key).(Node).handler.Set(cmd)
 }
+
 func (h Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan error) {
 	dataOut := make(chan common.GetResponse)
 	errorOut := make(chan error)
