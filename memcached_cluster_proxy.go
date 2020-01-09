@@ -73,7 +73,11 @@ func newHandlerFromConfig(hostnames string, clusterName string, dc string) handl
 	if hostnames != "" {
 		memcachedInstances = strings.Split(hostnames, ",")
 	} else {
-		memcachedInstances = consul.GetNodes(clusterName, consulAddr, dc)
+		var err error
+		memcachedInstances, err = consul.GetNodes(clusterName, consulAddr, dc)
+		if err != nil {
+			log.Fatalf("Error: couldn't fetch service from Consul: %s", err)
+		}
 	}
 
 	if len(memcachedInstances) <= 0 || len(memcachedInstances[0]) <= 0 {
