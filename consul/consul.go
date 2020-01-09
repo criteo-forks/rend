@@ -17,7 +17,6 @@ func GetNodes(service string, consulAddr string, dc string) ([]string, error) {
 		return nil, err
 	}
 
-	// Get a handle to the KV API
 	health := client.Health()
 	entries, _, err := health.Service(service, "", true, &api.QueryOptions{Datacenter: dc})
 	if err != nil {
