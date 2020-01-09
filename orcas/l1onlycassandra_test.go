@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/BarthV/memandra/orcas"
+	"github.com/netflix/rend/orcas"
 	"github.com/netflix/rend/common"
 	"github.com/netflix/rend/protocol/textprot"
 )
