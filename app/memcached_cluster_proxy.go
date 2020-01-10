@@ -13,6 +13,7 @@ import (
 
 	"github.com/netflix/rend/consul"
 	"github.com/netflix/rend/handlers"
+	"github.com/netflix/rend/handlers/couchbase"
 	"github.com/netflix/rend/handlers/memcached"
 	"github.com/netflix/rend/metrics"
 	"github.com/netflix/rend/orcas"
@@ -23,12 +24,16 @@ import (
 
 // Flags
 var (
+	srcType        string
+	dstType        string
 	srcClusterName string
 	dstClusterName string
 	srcHostnames   string
 	dstHostnames   string
 	srcClusterDC   string
 	dstClusterDC   string
+	srcBucketName  string
+	dstBucketName  string
 	consulAddr     string
 	listenPort     int
 	adminPort      int
@@ -39,13 +44,18 @@ func init() {
 	flag.IntVar(&adminPort, "admin-port", 8080, "Admin port for metrics and debug")
 	flag.StringVar(&consulAddr, "consul-addr", "localhost:8500", "Consul addr for service resolution (set --hostnames to no use)")
 
+	// TODO: make a real configuration file
+	flag.StringVar(&srcType, "source-cluster-type", "memcached", "(memcached or couchbase) type of cluster to configure")
 	flag.StringVar(&srcHostnames, "source-hostnames", "", "List of instances of for the source cluster (override Consul service)")
 	flag.StringVar(&srcClusterName, "source-cluster-name", "memcached-cluster", "The consul service name of the source cluster")
-	flag.StringVar(&srcClusterDC, "source-datacenter", "", "The datacenter used for destination cluster (empty for local)")
+	flag.StringVar(&srcClusterDC, "source-datacenter", "", "The datacenter used for source cluster (empty for local)")
+	flag.StringVar(&srcBucketName, "source-bucket", "", "The bucket to use for source couchbase cluster configuration")
 
+	flag.StringVar(&dstType, "destination-cluster-type", "memcached", "(memcached or couchbase) type of cluster to configure")
 	flag.StringVar(&dstHostnames, "destination-hostnames", "", "List of instances of for the destination cluster (override Consul service)")
 	flag.StringVar(&dstClusterName, "destination-cluster-name", "memcached-cluster", "The consul service name of the destination cluster")
 	flag.StringVar(&dstClusterDC, "destination-datacenter", "", "The datacenter used for destination cluster (empty for local)")
+	flag.StringVar(&dstBucketName, "destination-bucket", "", "The bucket to use for destination couchbase cluster configuration")
 
 	flag.Parse()
 
@@ -67,24 +77,32 @@ func init() {
 	metrics.SetPrefix("rend_")
 }
 
-func newHandlerFromConfig(hostnames string, clusterName string, dc string) handlers.HandlerConst {
-	var memcachedInstances []string
+func newHandlerFromConfig(clusterType string, hostnames string, clusterName string, dc string, bucket string) handlers.HandlerConst {
+	var instances []string
 
 	if hostnames != "" {
-		memcachedInstances = strings.Split(hostnames, ",")
+		instances = strings.Split(hostnames, ",")
 	} else {
 		var err error
-		memcachedInstances, err = consul.GetNodes(clusterName, consulAddr, dc)
+		instances, err = consul.GetNodes(clusterName, consulAddr, dc)
 		if err != nil {
 			log.Fatalf("Error: couldn't fetch service from Consul: %s", err)
 		}
 	}
 
-	if len(memcachedInstances) <= 0 || len(memcachedInstances[0]) <= 0 {
+	if len(instances) <= 0 || len(instances[0]) <= 0 {
 		log.Fatalf("Error: Cannot create a cluster (cluster: %s) of 0 nodes", clusterName)
 	}
 
-	return memcached.Cluster(memcachedInstances, clusterName)
+	switch clusterType {
+	case "memcached":
+		return memcached.Cluster(instances, clusterName)
+	case "couchbase":
+		return couchbase.NewHandlerConst(instances[0], bucket)
+	default:
+		log.Fatalf("Cluster type unsupported: %s", clusterType)
+	}
+	return nil
 }
 
 // And away we go
@@ -92,8 +110,8 @@ func main() {
 	l := server.TCPListener(listenPort)
 	protocols := []protocol.Components{binprot.Components}
 
-	sourceCluster := newHandlerFromConfig(srcHostnames, srcClusterName, srcClusterDC)
-	backfillCluster := newHandlerFromConfig(dstHostnames, dstClusterName, dstClusterDC)
+	sourceCluster := newHandlerFromConfig(srcType, srcHostnames, srcClusterName, srcClusterDC, srcBucketName)
+	backfillCluster := newHandlerFromConfig(dstType, dstHostnames, dstClusterName, dstClusterDC, dstBucketName)
 
 	log.Printf("Starting Rend (backfill mode) on port %d", listenPort)
 	go server.ListenAndServe(l, protocols, server.Default, orcas.Backfill, sourceCluster, backfillCluster)
