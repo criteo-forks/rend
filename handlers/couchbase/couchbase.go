@@ -31,6 +31,8 @@ func (c *couchbaseClient) close() error {
 }
 
 func (c *couchbaseClient) get(key []byte, data *[]byte) error {
+	// TODO: may have to check https://github.com/golang/go/issues/25484
+	// if string conversion is a perf bottleneck
 	_, err := c.client.Get(string(key), data)
 	return err
 }
