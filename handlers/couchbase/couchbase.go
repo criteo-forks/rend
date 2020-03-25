@@ -40,7 +40,7 @@ func (t CustomRawBinaryTranscoder) Decode(bytes []byte, flags uint32, out interf
 		*typedOut = string(bytes)
 		return nil
 	default:
-		return errors.New("Custom raw binary format must be encoded in a byte array or interface")
+		return errors.New("custom raw binary format must be encoded in a byte array or string")
 	}
 }
 
