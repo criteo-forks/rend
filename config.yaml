@@ -1,0 +1,5 @@
+ListenPort: 11221
+InternalMetricsListenAddress: 11299
+CassandraHostname: "cassandra-cstars999.service.consul.preprod.crto.in"
+CassandraKeyspace: "kvstore"
+CassandraBucket: "bucket1"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -19,7 +20,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-func init_default_config() {
+func initDefaultConfig() {
 	log.Println("Initializing configuration")
 	viper.SetDefault("ListenPort", 11221)
 	viper.SetDefault("InternalMetricsListenAddress", ":11299")
@@ -34,28 +35,21 @@ func init_default_config() {
 	viper.SetDefault("CassandraConnectTimeoutMs", 1000*time.Millisecond)
 }
 
-func load_config_from_env() {
-	log.Println("Mapping configuration from environment")
-	viper.BindEnv("ListenPort", "LISTENPORT")
-	viper.BindEnv("InternalMetricsListenAddress", "METRICSLISTENADDR")
-	viper.BindEnv("CassandraHostname", "CASSANDRAHOST")
-	viper.BindEnv("CassandraKeyspace", "CASSANDRAKEYSPACE")
-	viper.BindEnv("CassandraBucket", "CASSANDRABUCKET")
-	viper.BindEnv("CassandraBatchBufferItemSize", "BUFFERITEMSIZE")
-	viper.BindEnv("CassandraBatchBufferMaxAgeMs", "BUFFERMAXAGE")
-	viper.BindEnv("CassandraBatchMinItemSize", "BATCHMINSIZE")
-	viper.BindEnv("CassandraBatchMaxItemSize", "BATCHMAXSIZE")
-	viper.BindEnv("CassandraTimeoutMs", "CASSANDRATIMEOUT")
-	viper.BindEnv("CassandraConnectTimeoutMs", "CASSANDRACONNTIMEOUT")
-}
-
 func main() {
 	if _, set := os.LookupEnv("GOGC"); !set {
 		debug.SetGCPercent(100)
 	}
 
-	init_default_config()
-	load_config_from_env()
+	initDefaultConfig()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(".")
+	viper.AddConfigPath("/etc/memandra/")
+
+	err := viper.ReadInConfig() // Find and read the config file
+	if err != nil {             // Handle errors reading the config file
+		panic(fmt.Errorf("Fatal error config file: %s \n", err))
+	}
 
 	// http debug and metrics endpoint
 	go http.ListenAndServe(viper.GetString("InternalMetricsListenAddress"), nil)
