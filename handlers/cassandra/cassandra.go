@@ -3,21 +3,29 @@ package cassandra
 import (
 	"fmt"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gocql/gocql"
 	"github.com/netflix/rend/common"
-	"github.com/netflix/rend/handlers"
 	"github.com/netflix/rend/metrics"
 	"github.com/netflix/rend/timer"
 	"github.com/spf13/viper"
 )
 
 type Handler struct {
-	session      *gocql.Session
-	setbuffer    chan CassandraSet
-	buffertimer  *time.Timer
-	readonlymode bool
+	session       *gocql.Session
+	setbuffer     chan CassandraSet
+	keyspace      string
+	bucket        string
+	setStmt       string
+	getStmt       string
+	getEStmt      string
+	deleteStmt    string
+	replaceStmt   string
+	isShutingDown uint32
+	executors     sync.WaitGroup
 }
 
 type CassandraSet struct {
@@ -27,178 +35,136 @@ type CassandraSet struct {
 	Exptime uint32
 }
 
+// Dirty https://github.com/gocql/gocql/issues/915
+type SimpleConvictionPolicy struct{}
+
+func (e *SimpleConvictionPolicy) Reset(host *gocql.HostInfo) {}
+func (e *SimpleConvictionPolicy) AddFailure(error error, host *gocql.HostInfo) bool {
+	return false
+}
+
 // Cassandra Batching metrics
 var (
-	MetricSetBufferSize      = metrics.AddIntGauge("cmd_set_batch_buffer_size", nil)
-	MetricCmdSetBatch        = metrics.AddCounter("cmd_set_batch", nil)
-	MetricCmdSetBatchErrors  = metrics.AddCounter("cmd_set_batch_errors", nil)
-	MetricCmdSetBatchSuccess = metrics.AddCounter("cmd_set_batch_success", nil)
-	HistSetBatch             = metrics.AddHistogram("set_batch", false, nil)
-	HistSetBufferWait        = metrics.AddHistogram("set_batch_buffer_timewait", false, nil)
+	HistSetBufferWait = metrics.AddHistogram("set_batch_buffer_timewait", false, nil)
 )
 
-var singleton *Handler
-
 // SetReadonlyMode switch Cassandra handler to readonly mode for graceful exit
-func SetReadonlyMode() {
-	singleton.readonlymode = true
+func (h *Handler) Shutdown() {
+	atomic.AddUint32(&h.isShutingDown, 1)
+	close(h.setbuffer)
+	h.executors.Wait()
 }
 
-func bufferSizeCheckLoop() {
-	ticker := time.NewTicker(5 * time.Millisecond)
-	for {
-		select {
-		case <-ticker.C:
-			if len(singleton.setbuffer) >= viper.GetInt("CassandraBatchMinItemSize") {
-				go FlushBuffer()
-			}
-		}
-	}
+func (h *Handler) IsShutingDown() bool {
+	return atomic.LoadUint32(&h.isShutingDown) > 0
 }
 
-// FlushBuffer triggers a batched write operation in Cassandra target
-func FlushBuffer() {
-	chanLen := len(singleton.setbuffer)
-	metrics.SetIntGauge(MetricSetBufferSize, uint64(chanLen))
+// We read from the channel from N executor/goroutine in order to propagate the writes
+func (h *Handler) spawnSetExecutor() {
+	h.executors.Add(1)
 
-	if chanLen > 0 {
-		metrics.IncCounter(MetricCmdSetBatch)
+	for item := range h.setbuffer {
+		query := h.session.Query(h.setStmt, item.Key, item.Data, item.Exptime)
 
-		// fmt.Println(chanLen)
-		if chanLen >= viper.GetInt("CassandraBatchMaxItemSize") {
-			chanLen = viper.GetInt("CassandraBatchMaxItemSize")
-		}
-		b := singleton.session.NewBatch(gocql.UnloggedBatch)
-		for i := 1; i <= chanLen; i++ {
-			item := (<-singleton.setbuffer)
-			b.Query(
-				fmt.Sprintf(
-					"INSERT INTO %s.%s (keycol,valuecol) VALUES (?, ?) USING TTL ?",
-					viper.GetString("CassandraKeyspace"),
-					viper.GetString("CassandraBucket"),
-				),
-				item.Key,
-				item.Data,
-				item.Exptime,
-			)
-		}
-
-		// exec CQL batch
-		start := timer.Now()
-		err := singleton.session.ExecuteBatch(b)
-		if err != nil {
-			metrics.IncCounter(MetricCmdSetBatchErrors)
-			log.Println("[ERROR] Batched Cassandra SET returned an error. ", err)
-		} else {
-			metrics.IncCounter(MetricCmdSetBatchSuccess)
-			metrics.ObserveHist(HistSetBatch, timer.Since(start))
+		if err := query.Exec(); err != nil {
+			log.Println("[ERROR] Cassandra SET returned an error. ", err)
 		}
 	}
 
-	// TODO: we need to protect this timer reset, and make it thread safe !!
-	singleton.buffertimer.Reset(200 * time.Millisecond)
+	h.executors.Done()
 }
 
-// InitCassandraConn initialize Cassandra global connection, call it once before starting ListenAndServe()
-func InitCassandraConn() error {
-	// Only spawn a unique cassandra session,
-	// store this session in a global singleton.
-	if singleton == nil {
-		clust := gocql.NewCluster(viper.GetString("CassandraHostname"))
-		clust.Keyspace = viper.GetString("CassandraKeyspace")
-		clust.Consistency = gocql.LocalOne
-		clust.Timeout = viper.GetDuration("CassandraTimeoutMs")
-		clust.ConnectTimeout = viper.GetDuration("CassandraConnectTimeoutMs")
-		sess, err := clust.CreateSession()
-		if err != nil {
-			return err
-		}
+func New() (*Handler, error) {
+	cluster := gocql.NewCluster(viper.GetString("CassandraHostname"))
+	cluster.Keyspace = viper.GetString("CassandraKeyspace")
+	cluster.Consistency = gocql.LocalOne
+	cluster.Timeout = viper.GetDuration("CassandraTimeoutMs")
+	cluster.ConnectTimeout = viper.GetDuration("CassandraConnectTimeoutMs")
+	cluster.PoolConfig.HostSelectionPolicy = gocql.TokenAwareHostPolicy(gocql.RoundRobinHostPolicy())
+	cluster.ConvictionPolicy = &SimpleConvictionPolicy{}
+	cluster.NumConns = 10
 
-		singleton = &Handler{
-			session:      sess,
-			setbuffer:    make(chan CassandraSet, viper.GetInt("CassandraBatchBufferItemSize")),
-			buffertimer:  time.AfterFunc(viper.GetDuration("CassandraBatchBufferMaxAgeMs"), FlushBuffer),
-			readonlymode: false,
-		}
-
-		go bufferSizeCheckLoop()
+	sess, err := cluster.CreateSession()
+	if err != nil {
+		return nil, err
 	}
 
-	// TODO : prepare Cassandra statements for common queries
-	// Currently using session.bind() seems to registers statements if they don't exists in C*
+	cassandraHandler := &Handler{
+		session:  sess,
+		keyspace: viper.GetString("CassandraKeyspace"),
+		bucket:   viper.GetString("CassandraBucket"),
 
-	return nil
-}
+		// Statements
+		setbuffer:   make(chan CassandraSet, viper.GetInt("MemcachedMaxBufferedSetRequests")),
+		setStmt:     fmt.Sprintf("INSERT INTO %s (key,value) VALUES (?, ?) USING TTL ?", viper.GetString("CassandraBucket")),
+		getStmt:     fmt.Sprintf("SELECT key,value FROM %s WHERE key=? LIMIT 1", viper.GetString("CassandraBucket")),
+		getEStmt:    fmt.Sprintf("SELECT key,value,TTL(value) FROM %s where key=?", viper.GetString("CassandraBucket")),
+		deleteStmt:  fmt.Sprintf("DELETE FROM %s WHERE keycol=?", viper.GetString("CassandraBucket")),
+		replaceStmt: fmt.Sprintf("SELECT writetime(value) FROM %s WHERE key=? LIMIT 1", viper.GetString("CassandraBucket")),
 
-func New() (handlers.Handler, error) {
+		// Synchronization
+		isShutingDown: 0,
+		executors:     sync.WaitGroup{},
+	}
 
-	return singleton, nil
+	// Spawn go-routines that will fan out memcached requests to Cassandra
+	for i := 1; i <= viper.GetInt("CassandraNbConcurrentRequests"); i++ {
+		go cassandraHandler.spawnSetExecutor()
+	}
+
+	return cassandraHandler, nil
 }
 
 func (h *Handler) Close() error {
-
 	return nil
 }
 
 func computeExpTime(Exptime uint32) uint32 {
 	// Maximum allowed relative TTL in memcached protocol
-	max_ttl := uint32(60 * 60 * 24 * 30) // number of seconds in 30 days
-	if Exptime > max_ttl {
+	maxTtl := uint32(60 * 60 * 24 * 30) // number of seconds in 30 days
+	if Exptime > maxTtl {
 		return Exptime - uint32(time.Now().Unix())
 	}
 	return Exptime
 }
 
 func (h *Handler) Set(cmd common.SetRequest) error {
-	if h.readonlymode {
+	if h.IsShutingDown() {
 		return common.ErrItemNotStored
 	}
-	realExptime := computeExpTime(cmd.Exptime)
+
 	start := timer.Now()
 	h.setbuffer <- CassandraSet{
 		Key:     cmd.Key,
 		Data:    cmd.Data,
 		Flags:   cmd.Flags,
-		Exptime: realExptime,
+		Exptime: computeExpTime(cmd.Exptime),
 	}
 	metrics.ObserveHist(HistSetBufferWait, timer.Since(start))
-	// TODO : maybe add a set timeout that return "not_stored" in case of buffer error ?
+
+	//// TODO : maybe add a set timeout that return "not_stored" in case of buffer error ?
 	return nil
 }
 
 func (h *Handler) Add(cmd common.SetRequest) error {
-
 	return nil
 }
 
 func (h *Handler) Replace(cmd common.SetRequest) error {
-	if h.readonlymode {
+	if h.IsShutingDown() {
 		return common.ErrItemNotStored
 	}
 
-	key_qi := func(q *gocql.QueryInfo) ([]interface{}, error) {
-		values := make([]interface{}, 1)
-		values[0] = cmd.Key
-		return values, nil
-	}
+	/* TODO: better use "UPDATE ... IF EXISTS" pattern because it make use of
+	"Lightweight transactions" and it's more consistent. */
 	var wtime uint
-	if err := h.session.Bind(
-		/* TODO: better use "UPDATE ... IF EXISTS" pattern because it make use of
-		"Lightweight transactions" and it's more consistent. */
-		fmt.Sprintf(
-			"SELECT writetime(valuecol) FROM %s.%s WHERE keycol=? LIMIT 1",
-			viper.GetString("CassandraKeyspace"),
-			viper.GetString("CassandraBucket"),
-		),
-		key_qi,
-	).Scan(&wtime); err == nil {
-		realExptime := computeExpTime(cmd.Exptime)
-		start := timer.Now()
+	start := timer.Now()
+	if err := h.session.Query(h.replaceStmt, cmd.Key).Scan(&wtime); err == nil {
 		h.setbuffer <- CassandraSet{
 			Key:     cmd.Key,
 			Data:    cmd.Data,
 			Flags:   cmd.Flags,
-			Exptime: realExptime,
+			Exptime: computeExpTime(cmd.Exptime),
 		}
 		metrics.ObserveHist(HistSetBufferWait, timer.Since(start))
 		return nil
@@ -212,12 +178,10 @@ func (h *Handler) Replace(cmd common.SetRequest) error {
 }
 
 func (h *Handler) Append(cmd common.SetRequest) error {
-
 	return nil
 }
 
 func (h *Handler) Prepend(cmd common.SetRequest) error {
-
 	return nil
 }
 
@@ -225,44 +189,33 @@ func (h *Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan 
 	dataOut := make(chan common.GetResponse, len(cmd.Keys))
 	errorOut := make(chan error)
 
-	for idx, key := range cmd.Keys {
-		key_qi := func(q *gocql.QueryInfo) ([]interface{}, error) {
-			values := make([]interface{}, 1)
-			values[0] = key
-			return values, nil
-		}
+	go func() {
+		defer close(dataOut)
+		defer close(errorOut)
 
-		var val []byte
-
-		if err := h.session.Bind(
-			fmt.Sprintf(
-				"SELECT keycol,valuecol FROM %s.%s where keycol=?",
-				viper.GetString("CassandraKeyspace"),
-				viper.GetString("CassandraBucket"),
-			),
-			key_qi,
-		).Scan(&key, &val); err == nil {
-			dataOut <- common.GetResponse{
-				Miss:   false,
-				Quiet:  cmd.Quiet[idx],
-				Opaque: cmd.Opaques[idx],
-				Flags:  0,
-				Key:    []byte(key),
-				Data:   val,
-			}
-		} else {
-			dataOut <- common.GetResponse{
-				Miss:   true,
-				Quiet:  cmd.Quiet[idx],
-				Opaque: cmd.Opaques[idx],
-				Key:    []byte(key),
-				Data:   nil,
+		for idx, key := range cmd.Keys {
+			var val []byte
+			if err := h.session.Query(h.getStmt, key).Scan(&key, &val); err == nil {
+				dataOut <- common.GetResponse{
+					Miss:   false,
+					Quiet:  cmd.Quiet[idx],
+					Opaque: cmd.Opaques[idx],
+					Flags:  0,
+					Key:    key,
+					Data:   val,
+				}
+			} else {
+				dataOut <- common.GetResponse{
+					Miss:   true,
+					Quiet:  cmd.Quiet[idx],
+					Opaque: cmd.Opaques[idx],
+					Key:    key,
+					Data:   nil,
+				}
 			}
 		}
-	}
+	}()
 
-	close(dataOut)
-	close(errorOut)
 	return dataOut, errorOut
 }
 
@@ -270,46 +223,36 @@ func (h *Handler) GetE(cmd common.GetRequest) (<-chan common.GetEResponse, <-cha
 	dataOut := make(chan common.GetEResponse, len(cmd.Keys))
 	errorOut := make(chan error)
 
-	for idx, key := range cmd.Keys {
-		key_qi := func(q *gocql.QueryInfo) ([]interface{}, error) {
-			values := make([]interface{}, 1)
-			values[0] = key
-			return values, nil
-		}
+	go func() {
+		defer close(dataOut)
+		defer close(errorOut)
 
-		var val []byte
-		var ttl uint32
+		for idx, key := range cmd.Keys {
+			var val []byte
+			var ttl uint32
 
-		if err := h.session.Bind(
-			fmt.Sprintf(
-				"SELECT keycol,valuecol,TTL(valuecol) FROM %s.%s where keycol=?",
-				viper.GetString("CassandraKeyspace"),
-				viper.GetString("CassandraBucket"),
-			),
-			key_qi,
-		).Scan(&key, &val, &ttl); err == nil {
-			dataOut <- common.GetEResponse{
-				Miss:    false,
-				Quiet:   cmd.Quiet[idx],
-				Opaque:  cmd.Opaques[idx],
-				Flags:   0,
-				Key:     []byte(key),
-				Data:    val,
-				Exptime: ttl,
-			}
-		} else {
-			dataOut <- common.GetEResponse{
-				Miss:   true,
-				Quiet:  cmd.Quiet[idx],
-				Opaque: cmd.Opaques[idx],
-				Key:    []byte(key),
-				Data:   nil,
+			if err := h.session.Query(h.getEStmt, key).Scan(&key, &val, &ttl); err == nil {
+				dataOut <- common.GetEResponse{
+					Miss:    false,
+					Quiet:   cmd.Quiet[idx],
+					Opaque:  cmd.Opaques[idx],
+					Flags:   0,
+					Key:     key,
+					Data:    val,
+					Exptime: ttl,
+				}
+			} else {
+				dataOut <- common.GetEResponse{
+					Miss:   true,
+					Quiet:  cmd.Quiet[idx],
+					Opaque: cmd.Opaques[idx],
+					Key:    key,
+					Data:   nil,
+				}
 			}
 		}
-	}
+	}()
 
-	close(dataOut)
-	close(errorOut)
 	return dataOut, errorOut
 }
 
@@ -322,26 +265,12 @@ func (h *Handler) GAT(cmd common.GATRequest) (common.GetResponse, error) {
 }
 
 func (h *Handler) Delete(cmd common.DeleteRequest) error {
-	kv_qi := func(q *gocql.QueryInfo) ([]interface{}, error) {
-		values := make([]interface{}, 1)
-		values[0] = cmd.Key
-		return values, nil
-	}
-
-	if err := h.session.Bind(
-		fmt.Sprintf(
-			"DELETE FROM %s.%s WHERE keycol=?",
-			viper.GetString("CassandraKeyspace"),
-			viper.GetString("CassandraBucket"),
-		),
-		kv_qi,
-	).Exec(); err != nil {
+	if err := h.session.Query(h.deleteStmt, cmd.Key).Exec(); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (h *Handler) Touch(cmd common.TouchRequest) error {
-
 	return nil
 }

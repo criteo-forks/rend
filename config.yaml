@@ -3,3 +3,5 @@ InternalMetricsListenAddress: 11299
 CassandraHostname: "cassandra-cstars999.service.consul.preprod.crto.in"
 CassandraKeyspace: "kvstore"
 CassandraBucket: "bucket1"
+CassandraNbConcurrentRequests: 1
+MemcachedMaxBufferedSetRequests: 80000

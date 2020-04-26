@@ -27,12 +27,11 @@ func initDefaultConfig() {
 	viper.SetDefault("CassandraHostname", "127.0.0.1")
 	viper.SetDefault("CassandraKeyspace", "kvstore")
 	viper.SetDefault("CassandraBucket", "bucket")
-	viper.SetDefault("CassandraBatchBufferItemSize", 80000)
-	viper.SetDefault("CassandraBatchBufferMaxAgeMs", 200*time.Millisecond)
-	viper.SetDefault("CassandraBatchMinItemSize", 1000)
-	viper.SetDefault("CassandraBatchMaxItemSize", 5000)
-	viper.SetDefault("CassandraTimeoutMs", 1000*time.Millisecond)
+	viper.SetDefault("CassandraTimeoutMs", 10000*time.Millisecond)
 	viper.SetDefault("CassandraConnectTimeoutMs", 1000*time.Millisecond)
+	viper.SetDefault("CassandraNbConcurrentRequests", 500)
+	viper.SetDefault("MemcachedMaxBufferedSetRequests", 80*1000)
+	viper.SetDefault("GracefulShutdownWaitTimeInSec", 10*60)
 }
 
 func main() {
@@ -60,14 +59,17 @@ func main() {
 	var h1 handlers.HandlerConst
 	var h2 handlers.HandlerConst
 
-	// L1Only MODE
-	h1 = cassandra.New
-	h2 = handlers.NilHandler
-
-	// Init Cassandra connection in handler
-	if err := cassandra.InitCassandraConn(); err != nil {
+	// Init Cassandra connection
+	cassandraHandler, err := cassandra.New()
+	if err != nil {
 		log.Fatal(err)
 	}
+
+	// L1Only MODE
+	h1 = func() (handlers.Handler, error) {
+		return cassandraHandler, nil
+	}
+	h2 = handlers.NilHandler
 
 	l := server.TCPListener(viper.GetInt("ListenPort"))
 	ps := []protocol.Components{binprot.Components, textprot.Components}
@@ -80,11 +82,15 @@ func main() {
 	go func() {
 		_ = <-gracefulStop
 		log.Println("[INFO] Gracefully stopping Memandra server")
-		log.Println("[INFO] Setting Cassandra handler to readonly mode")
-		cassandra.SetReadonlyMode()
-		time.Sleep(500 * time.Millisecond)
-		log.Println("[INFO] Forcing write buffer to be flushed before exiting")
-		cassandra.FlushBuffer()
+		go func() {
+			waitTime := viper.GetDuration("GracefulShutdownWaitTimeInSec") * time.Second
+			log.Println("[INFO] Waiting", waitTime, "for Cassandra executors to shutdown")
+			time.Sleep(waitTime)
+			log.Println("[INFO] Forcing exit as", waitTime, "passed")
+			os.Exit(0)
+		}()
+
+		cassandraHandler.Shutdown()
 		os.Exit(0)
 	}()
 
