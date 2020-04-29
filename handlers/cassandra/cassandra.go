@@ -45,7 +45,12 @@ func (e *SimpleConvictionPolicy) AddFailure(error error, host *gocql.HostInfo) b
 
 // Cassandra Batching metrics
 var (
-	HistSetBufferWait = metrics.AddHistogram("set_batch_buffer_timewait", false, nil)
+	HistSetEnqueueLatencies = metrics.AddHistogram("set_enqueue_latencies", false, nil)
+	HistSetLatencies        = metrics.AddHistogram("set_cassandra_latencies", false, nil)
+	HistGetLatencies        = metrics.AddHistogram("get_cassandra_latencies", false, nil)
+	HistGetELatencies       = metrics.AddHistogram("gete_cassandra_latencies", false, nil)
+	HistReplaceLatencies    = metrics.AddHistogram("replace_cassandra_latencies", false, nil)
+	HistDeleteLatencies     = metrics.AddHistogram("delete_cassandra_latencies", false, nil)
 )
 
 // SetReadonlyMode switch Cassandra handler to readonly mode for graceful exit
@@ -64,11 +69,13 @@ func (h *Handler) spawnSetExecutor() {
 	h.executors.Add(1)
 
 	for item := range h.setbuffer {
+		start := timer.Now()
 		query := h.session.Query(h.setStmt, item.Key, item.Data, item.Exptime)
 
 		if err := query.Exec(); err != nil {
 			log.Println("[ERROR] Cassandra SET returned an error. ", err)
 		}
+		metrics.ObserveHist(HistSetLatencies, timer.Since(start))
 	}
 
 	h.executors.Done()
@@ -140,7 +147,7 @@ func (h *Handler) Set(cmd common.SetRequest) error {
 		Flags:   cmd.Flags,
 		Exptime: computeExpTime(cmd.Exptime),
 	}
-	metrics.ObserveHist(HistSetBufferWait, timer.Since(start))
+	metrics.ObserveHist(HistSetEnqueueLatencies, timer.Since(start))
 
 	//// TODO : maybe add a set timeout that return "not_stored" in case of buffer error ?
 	return nil
@@ -159,14 +166,16 @@ func (h *Handler) Replace(cmd common.SetRequest) error {
 	"Lightweight transactions" and it's more consistent. */
 	var wtime uint
 	start := timer.Now()
-	if err := h.session.Query(h.replaceStmt, cmd.Key).Scan(&wtime); err == nil {
+	err := h.session.Query(h.replaceStmt, cmd.Key).Scan(&wtime)
+	metrics.ObserveHist(HistReplaceLatencies, timer.Since(start))
+
+	if err == nil {
 		h.setbuffer <- CassandraSet{
 			Key:     cmd.Key,
 			Data:    cmd.Data,
 			Flags:   cmd.Flags,
 			Exptime: computeExpTime(cmd.Exptime),
 		}
-		metrics.ObserveHist(HistSetBufferWait, timer.Since(start))
 		return nil
 	} else {
 		if err.Error() == "not found" {
@@ -188,6 +197,7 @@ func (h *Handler) Prepend(cmd common.SetRequest) error {
 func (h *Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan error) {
 	dataOut := make(chan common.GetResponse, len(cmd.Keys))
 	errorOut := make(chan error)
+	start := timer.Now()
 
 	go func() {
 		defer close(dataOut)
@@ -214,6 +224,7 @@ func (h *Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan 
 				}
 			}
 		}
+		metrics.ObserveHist(HistGetLatencies, timer.Since(start))
 	}()
 
 	return dataOut, errorOut
@@ -222,6 +233,7 @@ func (h *Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan 
 func (h *Handler) GetE(cmd common.GetRequest) (<-chan common.GetEResponse, <-chan error) {
 	dataOut := make(chan common.GetEResponse, len(cmd.Keys))
 	errorOut := make(chan error)
+	start := timer.Now()
 
 	go func() {
 		defer close(dataOut)
@@ -251,6 +263,8 @@ func (h *Handler) GetE(cmd common.GetRequest) (<-chan common.GetEResponse, <-cha
 				}
 			}
 		}
+
+		metrics.ObserveHist(HistGetELatencies, timer.Since(start))
 	}()
 
 	return dataOut, errorOut
@@ -265,7 +279,12 @@ func (h *Handler) GAT(cmd common.GATRequest) (common.GetResponse, error) {
 }
 
 func (h *Handler) Delete(cmd common.DeleteRequest) error {
-	if err := h.session.Query(h.deleteStmt, cmd.Key).Exec(); err != nil {
+
+	start := timer.Now()
+	err := h.session.Query(h.deleteStmt, cmd.Key).Exec()
+	metrics.ObserveHist(HistDeleteLatencies, timer.Since(start))
+
+	if err != nil {
 		return err
 	}
 	return nil
