@@ -1,11 +1,13 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -39,11 +41,21 @@ func main() {
 		debug.SetGCPercent(100)
 	}
 
+	var configPath = flag.String("configFilePath", "", "File path where to find the config.yaml of the application")
+	flag.Parse()
+
 	initDefaultConfig()
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("/etc/memandra/")
+	if *configPath != "" {
+		dir, fileName := filepath.Split(*configPath)
+		viper.SetConfigName(fileName)
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(dir)
+	} else {
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(".")
+		viper.AddConfigPath("/etc/memandra/")
+	}
 
 	err := viper.ReadInConfig() // Find and read the config file
 	if err != nil {             // Handle errors reading the config file
