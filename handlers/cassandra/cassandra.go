@@ -106,7 +106,7 @@ func New() (*Handler, error) {
 		setStmt:     fmt.Sprintf("INSERT INTO %s (key,value) VALUES (?, ?) USING TTL ?", viper.GetString("CassandraBucket")),
 		getStmt:     fmt.Sprintf("SELECT key,value FROM %s WHERE key=? LIMIT 1", viper.GetString("CassandraBucket")),
 		getEStmt:    fmt.Sprintf("SELECT key,value,TTL(value) FROM %s where key=?", viper.GetString("CassandraBucket")),
-		deleteStmt:  fmt.Sprintf("DELETE FROM %s WHERE keycol=?", viper.GetString("CassandraBucket")),
+		deleteStmt:  fmt.Sprintf("DELETE FROM %s WHERE key=?", viper.GetString("CassandraBucket")),
 		replaceStmt: fmt.Sprintf("SELECT writetime(value) FROM %s WHERE key=? LIMIT 1", viper.GetString("CassandraBucket")),
 
 		// Synchronization
