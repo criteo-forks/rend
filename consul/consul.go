@@ -2,8 +2,9 @@ package consul
 
 import (
 	"fmt"
-	"github.com/hashicorp/consul/api"
 	"log"
+
+	"github.com/hashicorp/consul/api"
 )
 
 // GetNodes return a list of node addresses from a given Consul service
@@ -33,7 +34,11 @@ func getServiceFromConsul(getService func(string, string, bool, *api.QueryOption
 
 func extractNodesAddresses(entries []*api.ServiceEntry) (nodesAddr []string) {
 	for i := range entries {
-		nodesAddr = append(nodesAddr, fmt.Sprintf("%s:%d", entries[i].Service.Address, entries[i].Service.Port))
+		addr := entries[i].Service.Address
+		if addr == "" {
+			addr = entries[i].Node.Address
+		}
+		nodesAddr = append(nodesAddr, fmt.Sprintf("%s:%d", addr, entries[i].Service.Port))
 	}
 	return nodesAddr
 }
