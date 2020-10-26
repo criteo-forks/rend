@@ -45,13 +45,13 @@ func init() {
 	flag.StringVar(&consulAddr, "consul-addr", "localhost:8500", "Consul addr for service resolution (set --hostnames to no use)")
 
 	// TODO: make a real configuration file
-	flag.StringVar(&srcType, "source-cluster-type", "memcached", "(memcached or couchbase) type of cluster to configure")
+	flag.StringVar(&srcType, "source-cluster-type", "memcached", "(memcached/couchbase/aerospike) type of cluster to configure")
 	flag.StringVar(&srcHostnames, "source-hostnames", "", "List of instances of for the source cluster (override Consul service)")
 	flag.StringVar(&srcClusterName, "source-cluster-name", "memcached-cluster", "The consul service name of the source cluster")
 	flag.StringVar(&srcClusterDC, "source-datacenter", "", "The datacenter used for source cluster (empty for local)")
 	flag.StringVar(&srcBucketName, "source-bucket", "", "The bucket to use for source couchbase cluster configuration")
 
-	flag.StringVar(&dstType, "destination-cluster-type", "memcached", "(memcached or couchbase) type of cluster to configure")
+	flag.StringVar(&dstType, "destination-cluster-type", "memcached", "(noop/memcached/couchbase) type of cluster to configure")
 	flag.StringVar(&dstHostnames, "destination-hostnames", "", "List of instances of for the destination cluster (override Consul service)")
 	flag.StringVar(&dstClusterName, "destination-cluster-name", "memcached-cluster", "The consul service name of the destination cluster")
 	flag.StringVar(&dstClusterDC, "destination-datacenter", "", "The datacenter used for destination cluster (empty for local)")
@@ -85,7 +85,7 @@ func newHandlerFromConfig(clusterType string, hostnames string, clusterName stri
 	} else {
 		var err error
 		instances, err = consul.GetNodes(clusterName, consulAddr, dc)
-		log.Printf("%s", instances)
+		log.Printf("Discovered for %s: %s", clusterName, instances)
 		if err != nil {
 			log.Fatalf("Error: couldn't fetch service from Consul: %s", err)
 		}
@@ -102,6 +102,11 @@ func newHandlerFromConfig(clusterType string, hostnames string, clusterName stri
 			log.Fatalf("Error: Cannot create a cluster (cluster: %s) of 0 nodes", clusterName)
 		}
 		return couchbase.NewHandlerConst(instances[0], bucket)
+	case "aerospike":
+		if len(instances) <= 0 || len(instances[0]) <= 0 {
+			log.Fatalf("Error: Cannot create a cluster (cluster: %s) of 0 nodes", clusterName)
+		}
+		return couchbase.NewHandlerConst(instances[0], bucket)
 	case "noop":
 		return handlers.NilHandler
 	default:
@@ -112,6 +117,7 @@ func newHandlerFromConfig(clusterType string, hostnames string, clusterName stri
 
 // And away we go
 func main() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	l := server.TCPListener(listenPort)
 	protocols := []protocol.Components{binprot.Components}
 
