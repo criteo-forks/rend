@@ -13,6 +13,7 @@ import (
 
 	"github.com/netflix/rend/consul"
 	"github.com/netflix/rend/handlers"
+	"github.com/netflix/rend/handlers/aerospike"
 	"github.com/netflix/rend/handlers/couchbase"
 	"github.com/netflix/rend/handlers/memcached"
 	"github.com/netflix/rend/metrics"
@@ -24,6 +25,7 @@ import (
 
 // Flags
 var (
+	queryLayout    string
 	srcType        string
 	dstType        string
 	srcClusterName string
@@ -106,7 +108,7 @@ func newHandlerFromConfig(clusterType string, hostnames string, clusterName stri
 		if len(instances) <= 0 || len(instances[0]) <= 0 {
 			log.Fatalf("Error: Cannot create a cluster (cluster: %s) of 0 nodes", clusterName)
 		}
-		return couchbase.NewHandlerConst(instances[0], bucket)
+		return aerospike.NewHandlerConst(instances[0], bucket)
 	case "noop":
 		return handlers.NilHandler
 	default:
@@ -125,8 +127,8 @@ func main() {
 	backfillCluster := newHandlerFromConfig(dstType, dstHostnames, dstClusterName, dstClusterDC, dstBucketName)
 
 	if dstType == "noop" {
-		log.Printf("Starting Rend (in GET forwarder mode) on port %d", listenPort)
-		go server.ListenAndServe(l, protocols, server.Default, orcas.L1OnlyForwardGet, sourceCluster, backfillCluster)
+		log.Printf("Starting Rend (in GET L1 mode) on port %d", listenPort)
+		go server.ListenAndServe(l, protocols, server.Default, orcas.L1Only, sourceCluster, backfillCluster)
 	} else {
 		log.Printf("Starting Rend (backfill mode) on port %d", listenPort)
 		go server.ListenAndServe(l, protocols, server.Default, orcas.Backfill, sourceCluster, backfillCluster)
