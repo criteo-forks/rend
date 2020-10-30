@@ -88,8 +88,16 @@ func (h *Handler) realHandleGet(cmd common.GetRequest, dataOut chan common.GetRe
 				break
 			}
 		} else {
-			// TODO: find a way to make it safer
-			data = record.Bins["value"].([]byte)
+			rawData, ok := record.Bins["value"]
+			if !ok {
+				errorOut <- errors.New("Bin retrieved from Aerospike was not found")
+				break
+			}
+			data, ok = rawData.([]byte)
+			if !ok {
+				errorOut <- errors.New("Data retrieved from AeroSpike was corrupted")
+				break
+			}
 		}
 		dataOut <- common.GetResponse{Key: key, Data: data, Opaque: cmd.Opaques[i], Flags: 0, Miss: miss, Quiet: cmd.Quiet[i]}
 	}
