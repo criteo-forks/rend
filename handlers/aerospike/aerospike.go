@@ -50,9 +50,9 @@ func (h Handler) Set(cmd common.SetRequest) error {
 	if err != nil {
 		return err
 	}
-	data := aero.BinMap{"value": cmd.Data}
+	bin := aero.NewBin("value", cmd.Data)
 	policy := aero.NewWritePolicy(0, cmd.Exptime)
-	return h.client.Put(policy, key, data)
+	return h.client.PutBins(policy, key, bin)
 }
 
 func (h Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan error) {
