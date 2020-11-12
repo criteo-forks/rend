@@ -26,6 +26,10 @@ func NewHandler(clusterAddr string, bucketName string) (Handler, error) {
 	if err != nil {
 		return Handler{}, err
 	}
+	//clientPolicy := aero.NewClientPolicy()
+	//clientPolicy.MinConnectionsPerNode = 2
+	//clientPolicy.ConnectionQueueSize = 4096
+	//client, err := aero.NewClientWithPolicy(clientPolicy, addr[0], port)
 	client, err := aero.NewClient(addr[0], port)
 	if err != nil {
 		return Handler{}, err
@@ -41,18 +45,38 @@ func NewHandlerConst(clusterAddr string, bucketName string) handlers.HandlerCons
 }
 
 func (h Handler) Close() error {
+	return nil
+}
+
+func (h Handler) Shutdown() error {
 	h.client.Close()
 	return nil
 }
 
 func (h Handler) Set(cmd common.SetRequest) error {
+	errorOut := make(chan error)
+
+	go h.realHandleSet(cmd, errorOut)
+
+	tErr, ok := <-errorOut
+	if !ok {
+		return nil
+	} else {
+		return tErr
+	}
+}
+
+func (h *Handler) realHandleSet(cmd common.SetRequest, errorOut chan error) {
+	defer close(errorOut)
+
 	key, err := aero.NewKey(h.namespace, h.set, cmd.Key)
 	if err != nil {
-		return err
+		errorOut <- err
 	}
 	bin := aero.NewBin("value", cmd.Data)
 	policy := aero.NewWritePolicy(0, cmd.Exptime)
-	return h.client.PutBins(policy, key, bin)
+	errorOut <- h.client.PutBins(policy, key, bin)
+
 }
 
 func (h Handler) Get(cmd common.GetRequest) (<-chan common.GetResponse, <-chan error) {
