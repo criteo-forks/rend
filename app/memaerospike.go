@@ -30,6 +30,7 @@ func initAeroDefaultConfig() {
 	viper.SetDefault("ClusterName", "aerospike-nvme-bench-3-nodes")
 	viper.SetDefault("Bucket", "persisted")
 	viper.SetDefault("NbConcurrentRequests", 500)
+	viper.SetDefault("MemcachedMaxBufferedSetRequests", 80*1000)
 	viper.SetDefault("GracefulShutdownWaitTimeInSec", 10*60)
 }
 
@@ -61,9 +62,6 @@ func main() {
 
 	// http debug and metrics endpoint
 	go http.ListenAndServe(viper.GetString("InternalMetricsListenAddress"), nil)
-
-	// metrics output prefix
-	// metrics.SetPrefix("memandra_")
 
 	var h1 handlers.HandlerConst
 	var h2 handlers.HandlerConst
