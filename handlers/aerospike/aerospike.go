@@ -253,6 +253,31 @@ func (h Handler) Add(cmd common.SetRequest) error {
 	return nil
 }
 func (h Handler) Replace(cmd common.SetRequest) error {
+	if h.IsShutingDown() {
+		return common.ErrItemNotStored
+	}
+
+	start := timer.Now()
+	aeroKey, err := aero.NewKey(h.namespace, h.set, cmd.Key)
+	if err != nil {
+		log.Println("[ERROR] NewKey get creation failed", err)
+		return err
+	}
+	exist, err := h.client.Exists(nil, aeroKey)
+	metrics.ObserveHist(HistReplaceLatencies, timer.Since(start))
+
+	if err == nil && exist {
+		h.setbuffer <- AerospikeGetSet{
+			Get:    false,
+			cmdSet: &cmd,
+		}
+	} else {
+		if !exist {
+			return common.ErrKeyNotFound
+		} else {
+			return common.ErrInternal
+		}
+	}
 	return nil
 }
 func (h Handler) Append(cmd common.SetRequest) error {
