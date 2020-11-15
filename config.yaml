@@ -1,7 +1,5 @@
-ListenPort: 11221
+ListenPort: "11220"
 InternalMetricsListenAddress: ":11299"
-CassandraHostname: "cassandra-cstars999.service.consul.preprod.crto.in"
-CassandraKeyspace: "kvstore"
-CassandraBucket: "bucket1"
-CassandraNbConcurrentRequests: 1
-MemcachedMaxBufferedSetRequests: 80000
+ConsulAddr: "consul-relay.service.par.consul.preprod.crto.in:8500"
+ClusterName: "aerospike-nvme-bench-3-nodes"
+NbConcurrentRequests: 1
