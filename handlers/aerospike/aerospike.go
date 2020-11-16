@@ -113,8 +113,13 @@ func (h Handler) HandleSet(item AerospikeGetSet) {
 		return
 	}
 
-	bin := aero.NewBin("value", item.cmdSet.Data)
-	err = h.client.PutBins(aero.NewWritePolicy(0, item.cmdSet.Exptime), key, bin)
+	binValue := aero.NewBin("value", item.cmdSet.Data)
+	if item.cmdSet.Flags != 0 {
+		binFlags := aero.NewBin("flags", item.cmdSet.Flags)
+		err = h.client.PutBins(aero.NewWritePolicy(0, item.cmdSet.Exptime), key, binValue, binFlags)
+	} else {
+		err = h.client.PutBins(aero.NewWritePolicy(0, item.cmdSet.Exptime), key, binValue)
+	}
 	if err != nil {
 		log.Println("[ERROR] Aerospike put returned an error. ", item.cmdSet.Key, err)
 	}
@@ -139,8 +144,9 @@ func (h Handler) HandleGet(item AerospikeGetSet) {
 			item.errorOut <- err
 			break
 		}
-		record, err := h.client.Get(nil, aeroKey, "value")
+		record, err := h.client.Get(nil, aeroKey, "value", "flags")
 		data := []byte{}
+		var flags uint32 = 0
 		if err != nil {
 			if err.Error() == errNotFound {
 				miss = true
@@ -154,7 +160,7 @@ func (h Handler) HandleGet(item AerospikeGetSet) {
 			rawData, ok := record.Bins["value"]
 			if !ok {
 				miss = true
-				log.Println("[ERROR] Bin retrieved from Aerospike was not found")
+				log.Println("[ERROR] Value bin retrieved from Aerospike was not found")
 				item.errorOut <- errors.New("Bin retrieved from Aerospike was not found")
 				break
 			}
@@ -165,8 +171,12 @@ func (h Handler) HandleGet(item AerospikeGetSet) {
 				item.errorOut <- errors.New("Data retrieved from AeroSpike was corrupted")
 				break
 			}
+			rawFlags, ok := record.Bins["flags"]
+			if ok {
+				flags = uint32(rawFlags.(int))
+			}
 		}
-		item.dataOut <- common.GetResponse{Key: key, Data: data, Opaque: item.cmdGet.Opaques[i], Flags: 0, Miss: miss, Quiet: item.cmdGet.Quiet[i]}
+		item.dataOut <- common.GetResponse{Key: key, Data: data, Opaque: item.cmdGet.Opaques[i], Flags: flags, Miss: miss, Quiet: item.cmdGet.Quiet[i]}
 		metrics.ObserveHist(HistGetLatencies, timer.Since(start))
 	}
 }
